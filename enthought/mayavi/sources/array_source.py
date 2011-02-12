@@ -23,16 +23,25 @@ def _check_scalar_array(obj, name, value):
     if value is None:
         return None
     arr = numpy.asarray(value)
-    assert len(arr.shape) in [2,3], "Scalar array must be 2 or 3 dimensional"
+    if arr.ndim == 4:
+        assert arr.dtype.char=='B', \
+               "The only 4-dimensional arrays allowed are unsigned 8bit ints"
+        assert arr.shape[-1] == 4, \
+               "Color component dimension for scalar array must be length-4"
+        # now it is 100% positively an rgba byte array
+        xyz_dims = arr.shape[:-1]
+    else:
+        xyz_dims = arr.shape
+    assert len(xyz_dims) in [2,3], "Scalar array must be 2 or 3 dimensional"
     vd = obj.vector_data
     if vd is not None:
-        assert vd.shape[:-1] == arr.shape, \
+        assert vd.shape[:-1] == xyz_dims, \
                "Scalar array must match already set vector data.\n"\
                "vector_data.shape = %s, given array shape = %s"%(vd.shape,
-                                                                 arr.shape)
+                                                                 xyz_dims)
     return arr
 
-_check_scalar_array.info = 'a 2D or 3D numpy array'
+_check_scalar_array.info = 'a 2-, 3-, or 4D numpy array'
 
 def _check_vector_array(obj, name, value):
     """Validates a vector array passed to the object."""
@@ -67,7 +76,7 @@ class ArraySource(Source):
 
     # The name of our scalar array.
     scalar_name = Str('scalar')
-
+    
     # The vector array data we manage.
     vector_data = Trait(None, _check_vector_array, rich_compare=False)
 
@@ -90,7 +99,7 @@ class ArraySource(Source):
     # The image data stored by this instance.
     image_data = Instance(tvtk.ImageData, (), allow_none=False)
 
-    # Use an ImageChangeInformation filter to reliably set the
+    # Use an ImageChangeInformation filter to reliably set the 
     # spacing and origin on the output
     change_information_filter = Instance(tvtk.ImageChangeInformation, args=(),
                                          kw={'output_spacing' : (1.0, 1.0, 1.0),
@@ -116,7 +125,7 @@ class ArraySource(Source):
                       Item(name='origin'),
                       show_labels=True)
                 )
-
+    
     ######################################################################
     # `object` interface.
     ######################################################################
@@ -140,7 +149,7 @@ class ArraySource(Source):
         d = super(ArraySource, self).__get_pure_state__()
         d.pop('image_data', None)
         return d
-
+    
     ######################################################################
     # ArraySource interface.
     ######################################################################
@@ -169,18 +178,30 @@ class ArraySource(Source):
             img_data.point_data.scalars = None
             self.data_changed = True
             return
-        dims = list(data.shape)
+        is_rgba_bytes = (data.dtype.char=='B' and data.shape[-1]==4)
+        dims = list(data.shape[:-1]) if is_rgba_bytes else list(data.shape)
         if len(dims) == 2:
             dims.append(1)
-
+      
         img_data.origin = tuple(self.origin)
         img_data.dimensions = tuple(dims)
         img_data.extent = 0, dims[0]-1, 0, dims[1]-1, 0, dims[2]-1
         img_data.update_extent = 0, dims[0]-1, 0, dims[1]-1, 0, dims[2]-1
+
+        flat_shape = ( numpy.prod(dims), )
+        if is_rgba_bytes:
+            flat_shape += (4,)
         if self.transpose_input_array:
-            img_data.point_data.scalars = numpy.ravel(numpy.transpose(data))
+            if is_rgba_bytes:
+                # keep the color components in the last dimension
+                d = data.transpose(2,1,0,3).copy()
+                d.shape = flat_shape
+                img_data.point_data.scalars = d
+            else:
+                img_data.point_data.scalars = numpy.ravel(numpy.transpose(data))
         else:
-            img_data.point_data.scalars = numpy.ravel(data)
+            img_data.point_data.scalars = data.reshape(flat_shape)
+        img_data.number_of_scalar_components = 4 if is_rgba_bytes else 1
         img_data.point_data.scalars.name = self.scalar_name
         # This is very important and if not done can lead to a segfault!
         typecode = data.dtype
@@ -202,7 +223,7 @@ class ArraySource(Source):
         if len(dims) == 3:
             dims.insert(2, 1)
             data = numpy.reshape(data, dims)
-
+        
         img_data.origin = tuple(self.origin)
         img_data.dimensions = tuple(dims[:-1])
         img_data.extent = 0, dims[0]-1, 0, dims[1]-1, 0, dims[2]-1
@@ -225,7 +246,7 @@ class ArraySource(Source):
         if self.scalar_data is not None:
             self.image_data.point_data.scalars.name = value
             self.data_changed = True
-
+            
     def _vector_name_changed(self, value):
         if self.vector_data is not None:
             self.image_data.point_data.vectors.name = value
